@@ -1,0 +1,53 @@
+# Compiled extensionless executable files in /src/*/
+# This stanza must precede wildcard patterns below!
+/src/*/*
+!/src/*/*.*
+!/src/doc/*
+!/src/*/Makefile
+!/src/*/README
+
+# Compiled Object files and python ciles
+*.slo
+*.lo
+*.o
+*.obj
+*.pyc
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Test log files
+*.testlog
+
+# emacs saves
+[#]*[#]
+.[#]*
+*~
+
+# [ecg]tag files
+TAGS
+tags
+GTAGS
+GRTAGS
+GPATH
+GSYMS
+
+# Make dependencies
+.depend.mk
+
+# some weird thing that MacOs creates.
+*.dSYM
+
+# Windows executable, symbol and some weird files.
+*.exe
+*.pdb
+*.exp
+*.manifest
