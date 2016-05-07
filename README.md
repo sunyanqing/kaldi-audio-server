@@ -9,7 +9,7 @@ It is based on online2 & nnet2, and provides multi tcp service at the same time.
 More features that maybe useful for a practical system, as well as client side demo will be added later.
 
 To start, you need to INSTALL Kaldi from [main Kaldi repository] (https://github.com/kaldi-asr/kaldi) in GitHub. 
-Then build `audio-server-online2-nnet2` based on Kaldi.
+`Make ext` maybe also required. Then build `audio-server-online2-nnet2` based on Kaldi.
 
 To test, you could use any online2 & nnet2 model trained with kaldi, such as [Librispeech TDNN models with silence probability] (http://kaldi-asr.org/downloads/build/10/trunk/egs/librispeech/s5/archive.tar.gz).
 

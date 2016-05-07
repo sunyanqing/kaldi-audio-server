@@ -22,6 +22,7 @@
 #include "online2/onlinebin-util.h"
 #include "online2/online-timing.h"
 #include "online2/online-endpoint.h"
+#include "online/online-tcp-source.h"
 #include "fstext/fstext-lib.h"
 #include "lat/lattice-functions.h"
 #include "thread/kaldi-thread.h"
@@ -91,23 +92,6 @@ class DecoderPool {
   DecoderThread* _decoder_threads;
   int32 _num;
 };
-
-bool ReadFull(int32 socket, char* buf, int32 len) {
-  int32 to_read = len;
-  int32 has_read = 0;
-  int32 ret;
-
-  while (to_read > 0) {
-    ret = read(socket, buf + has_read, to_read);
-    if (ret <= 0) {
-      return false;
-    }
-    to_read -= ret;
-    has_read += ret;
-  }
-
-  return true;
-}
 
 bool WriteLine(int32 socket, std::string line) {
   line = line + "\n";
@@ -248,14 +232,12 @@ int main(int argc, char *argv[]) {
     // as well as the basic features.
     OnlineNnet2FeaturePipelineConfig feature_config;
     OnlineNnet2DecodingThreadedConfig nnet2_decoding_config;
-    
-    bool do_endpointing = false;
+
     bool modify_ivector_config = false;
+    int32 server_port_number = 5010;
     
     po.Register("word-symbol-table", &word_syms_rxfilename,
                 "Symbol table for words [for debug output]");
-    po.Register("do-endpointing", &do_endpointing,
-                "If true, apply endpoint detection");
     po.Register("modify-ivector-config", &modify_ivector_config,
                 "If true, modifies the iVector configuration from the config files "
                 "by setting --use-most-recent-ivector=true and --greedy-ivector-extractor=true. "
@@ -264,6 +246,8 @@ int main(int argc, char *argv[]) {
                 "to the --online option in online2-wav-nnet2-latgen-faster");
     po.Register("num-threads-startup", &g_num_threads,
                 "Number of threads used when initializing iVector extractor.  ");
+    po.Register("server-port-number", &server_port_number,
+                "Tcp based Server port number for accepting tasks");
     
     feature_config.Register(&po);
     decoder_pool._config.Register(&po);
@@ -313,7 +297,7 @@ int main(int argc, char *argv[]) {
     decoder_pool.Run(g_num_threads);
     
     TcpServer tcp_server;
-    if (!tcp_server.Listen(5010))
+    if (!tcp_server.Listen(server_port_number))
       return 0;
     
     int testcase_num = 0;
@@ -442,12 +426,11 @@ void* DecoderPool::ThreadProc(void* para) {
       SingleUtteranceNnet2DecoderThreaded decoder(
           dt->_pool->_config, dt->_pool->_tmodel, dt->_pool->_am_nnet,
           *dt->_pool->_fst, *dt->_pool->_feature_info, adaptation_state);
-            
-      std::string spk = "";
+
+      OnlineTcpVectorSource au_src(dt->_client_socket);
+      int32 packet_size = 1024;
       std::string utt = "";
       BaseFloat samp_freq = 16000;
-      char* pack = NULL;
-      int32 pack_size = 0;
       
       int32 start_time = clock();
       
@@ -458,54 +441,26 @@ void* DecoderPool::ThreadProc(void* para) {
       
       // Client loop to receive wav data
       while(true) {
-        int32 wav_size = 0;
-        if (!ReadFull(dt->_client_socket, (char*) &wav_size, 4))
-          break;
+        Vector<BaseFloat> wav_data(packet_size / 2);
+        bool ans = au_src.Read(&wav_data);
+        if (!ans) break;
+
+        decoder.AcceptWaveform(samp_freq, wav_data);
         
-        if (wav_size % 2 != 0) {
-          KALDI_ERR << "Pack size must be even!";
-          break;
-        }
+        samp_offset += packet_size / 2;
+        decoding_timer.SleepUntil(samp_offset / samp_freq);
         
-        if(wav_size > 0) {
-          if (pack_size < wav_size) {
-            pack_size = wav_size;
-            if(pack != NULL) delete[] pack;
-            pack = new char[pack_size];
-          }
-          
-          if (!ReadFull(dt->_client_socket, pack, pack_size))
-            break;
-          
-          int pack_n = pack_size / 2;
-          short* s_pack = (short*)pack;
-          
-          Vector<BaseFloat> wav_data;
-          wav_data.Resize(pack_n);
-          for (int32 i = 0; i < pack_n; i++)
-            wav_data(i) = s_pack[i];
-          
-          decoder.AcceptWaveform(samp_freq, wav_data);
-          
-          samp_offset += pack_n;
-          decoding_timer.SleepUntil(samp_offset / samp_freq);
-          
-          if(samp_offset - samp_partial > samp_freq) {
-            samp_partial = samp_offset;
-            end_of_utterance = false;
-            decoder.GetLattice(end_of_utterance, &clat, NULL);
-            GetDiagnosticsAndPrintOutput(dt->_client_socket, end_of_utterance, start_time,
-                                         utt, dt->_pool->_tmodel, *dt->_pool->_lexicon_info,
-                                         dt->_pool->_word_syms, clat, samp_offset);
-          }
-        } else if(wav_size == 0) {
-          // no more input. flush out last frames
-          break;
+        if(samp_offset - samp_partial > 5.0 * samp_freq) {
+          samp_partial = samp_offset;
+          end_of_utterance = false;
+          decoder.GetLattice(end_of_utterance, &clat, NULL);
+          GetDiagnosticsAndPrintOutput(dt->_client_socket, end_of_utterance, start_time,
+                                       utt, dt->_pool->_tmodel, *dt->_pool->_lexicon_info,
+                                       dt->_pool->_word_syms, clat, samp_offset);
         }
       }
-      if(pack != NULL) delete[] pack;
       if(samp_offset == 0) break;
-      
+
       decoder.InputFinished();
       Timer timer;
       decoder.Wait();

@@ -21,6 +21,7 @@ OBJFILES =
 TESTFILES =
 
 ADDLIBS = $(KALDI_ROOT)/src/online2/kaldi-online2.a \
+          $(KALDI_ROOT)/src/online/kaldi-online.a \
           $(KALDI_ROOT)/src/ivector/kaldi-ivector.a \
           $(KALDI_ROOT)/src/nnet2/kaldi-nnet2.a \
           $(KALDI_ROOT)/src/lat/kaldi-lat.a \
