@@ -38,11 +38,6 @@ ADDLIBS = $(KALDI_ROOT)/src/online2/kaldi-online2.a \
           $(KALDI_ROOT)/src/util/kaldi-util.a \
           $(KALDI_ROOT)/src/base/kaldi-base.a
 
-all: $(BINFILES)
-
-clean: 
-	-rm -f *.o *.a $(TESTFILES) $(BINFILES)
-
 include $(KALDI_ROOT)/src/makefiles/default_rules.mk
 
 
