@@ -1,20 +1,36 @@
 all:
 
-KALDI_ROOT?=../../kaldi
+KALDI_ROOT?=../
 
 ifeq ("$(wildcard $(KALDI_ROOT)/src/kaldi.mk)","")
 $(error Cannot find Kaldi's makefile $(KALDI_ROOT)/src/kaldi.mk. \
 Specify Kaldi's root directory using KALDI_ROOT when issuing make, e.g.: `KALDI_ROOT=/home/speech/kaldi make` )
 endif
 
+EXTRA_CXXFLAGS += -Wno-sign-compare -I $(KALDI_ROOT)/tools/portaudio/install/include
 include $(KALDI_ROOT)/src/kaldi.mk
 ifneq ($(KALDI_FLAVOR), dynamic)
 $(error Kaldi must compiled with dynamic libraries support. Run configure with --shared flag. )
 endif
+ifeq ($(UNAME), Linux)
+  ifneq "$(wildcard $(KALDI_ROOT)/tools/portaudio/install/lib/libportaudio.a)" ""
+    EXTRA_LDLIBS = $(KALDI_ROOT)/tools/portaudio/install/lib/libportaudio.a
+  else
+    EXTRA_LDLIBS = $(KALDI_ROOT)/tools/portaudio/install/lib64/libportaudio.a
+  endif
+  ifneq ($(wildcard $(KALDI_ROOT)/tools/portaudio/install/include/pa_linux_alsa.h),)
+    EXTRA_LDLIBS += -lasound -lrt
+  else
+    EXTRA_LDLIBS += -lrt
+  endif
+  ifneq ($(wildcard $(KALDI_ROOT)/tools/portaudio/install/include/pa_jack.h),)
+    EXTRA_LDLIBS += -ljack
+  endif
+endif
 
 CXXFLAGS += -I$(KALDI_ROOT)/src
 
-BINFILES = audio-server-online2-nnet2
+BINFILES = audio-server-online2-nnet2 audio-server-online2-nnet3
 
 OBJFILES =
 
