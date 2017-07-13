@@ -386,6 +386,7 @@ int32 TcpServer::Accept() {
   inet_ntop(AF_INET, &s->sin_addr, ipstr, sizeof ipstr);
 
   KALDI_LOG << "TcpServer: Accepted connection from: " << ipstr;
+  signal(SIGPIPE, SIG_IGN);
 
   return client_desc;
 }

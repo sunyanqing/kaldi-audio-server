@@ -1,6 +1,6 @@
 // audio-server-online2-nnet3.cc
 
-// Copyright 2016       Junjie Wang, Yanqing Sun
+// Copyright 2016-2017       Junjie Wang, Yanqing Sun
 
 // See ../../COPYING for clarification regarding multiple authors
 //
@@ -18,15 +18,16 @@
 // limitations under the License.
 
 #include "feat/wave-reader.h"
-#include "online2/online-nnet2-feature-pipeline.h"
 #include "online2/online-nnet3-decoding.h"
+#include "online2/online-nnet2-feature-pipeline.h"
 #include "online2/onlinebin-util.h"
 #include "online2/online-timing.h"
 #include "online2/online-endpoint.h"
 #include "online/online-tcp-source.h"
 #include "fstext/fstext-lib.h"
 #include "lat/lattice-functions.h"
-#include "thread/kaldi-thread.h"
+#include "util/kaldi-thread.h"
+#include "nnet3/nnet-utils.h"
 
 #include "lat/kaldi-lattice.h"
 #include "lat/word-align-lattice-lexicon.h"
@@ -43,6 +44,10 @@
 #include <mcheck.h>
 
 namespace kaldi {
+
+int32 packet_size = 512;
+BaseFloat chunk_length_secs = 0.18;
+BaseFloat secs_per_frame = 0.01;
 
 /*
  * This class is for a very simple TCP server implementation
@@ -67,9 +72,9 @@ class DecoderPool {
   ~DecoderPool();
   
   // Decoder related data structures
-  OnlineNnet3DecodingConfig _config;
-  TransitionModel _tmodel;
-  nnet3::AmNnetSimple _am_nnet;
+  LatticeFasterDecoderConfig decoder_opts;
+  TransitionModel trans_model;
+  nnet3::DecodableNnetSimpleLoopedInfo *decodable_info;
   fst::Fst<fst::StdArc> *_fst;
   OnlineNnet2FeaturePipelineInfo *_feature_info;
   fst::SymbolTable *_word_syms;
@@ -150,7 +155,7 @@ void GetDiagnosticsAndPrintOutput(int32 socket,
       if(result != "") {
         result = "PARTIAL:" + result;
         WriteLine(socket, result);
-        KALDI_LOG << "Partial result: " << result;
+        KALDI_VLOG(1) << "Partial result: " << result;
       }
     }
   } else {
@@ -164,6 +169,7 @@ void GetDiagnosticsAndPrintOutput(int32 socket,
     WordAlignLatticeLexiconOpts opts;
     bool ok = WordAlignLatticeLexicon(best_path_clat, tmodel, lexicon_info, opts,
                                       &aligned_clat);
+    TopSortCompactLatticeIfNeeded(&aligned_clat);
     CompactLatticeToWordAlignment((ok ? aligned_clat : best_path_clat), &words, &times,
                                   &lengths);
     
@@ -180,8 +186,9 @@ void GetDiagnosticsAndPrintOutput(int32 socket,
     sstr << "RESULT:NUM=" << words_num << ",FORMAT=WSE,RECO-DUR=" << dur
          << ",INPUT-DUR=" << input_dur;
     WriteLine(socket, sstr.str());
-    KALDI_LOG << sstr.str();
+    KALDI_VLOG(1) << sstr.str();
     
+    std::string result = "";
     for (size_t i = 0; i < words.size(); i++) {
       if (words[i] == 0)
         continue;  //skip silences...
@@ -190,15 +197,24 @@ void GetDiagnosticsAndPrintOutput(int32 socket,
       if (word_syms != NULL) word = word_syms->Find(words[i]);
       if (word.empty())
         word = "???";
+      else {
+        if(result != "") result += " ";
+        result += word;
+      }
       
-      float start = times[i] / 100.0;
-      float len = lengths[i] / 100.0;
+      float start = times[i] * secs_per_frame;
+      float len = lengths[i] * secs_per_frame;
 
       std::stringstream wstr;
       wstr << word << "," << start << "," << (start + len);
 
       WriteLine(socket, wstr.str());
-      KALDI_LOG << wstr.str();
+      KALDI_VLOG(1) << wstr.str();
+    }
+    if(result != "") {
+      result = "FINAL:" + result;
+      WriteLine(socket, result);
+      KALDI_VLOG(1) << "FINAL result: " << result;
     }
   }
 }
@@ -224,18 +240,23 @@ int main(int argc, char *argv[]) {
     
     DecoderPool decoder_pool;
     ParseOptions po(usage);
-    
-    std::string word_syms_rxfilename;
-    
-    OnlineEndpointConfig endpoint_config;
 
-    // feature_config includes configuration for the iVector adaptation,
+    std::string word_syms_rxfilename;
+
+    // feature_opts includes configuration for the iVector adaptation,
     // as well as the basic features.
-    OnlineNnet2FeaturePipelineConfig feature_config;
+    OnlineNnet2FeaturePipelineConfig feature_opts;
+    nnet3::NnetSimpleLoopedComputationOptions decodable_opts;
+    //LatticeFasterDecoderConfig decoder_opts;
+    OnlineEndpointConfig endpoint_opts;
 
     bool modify_ivector_config = false;
     int32 server_port_number = 5010;
     
+    po.Register("chunk-length", &chunk_length_secs,
+                "Length of chunk size in seconds, that we process.  Set to <= 0 "
+                "to use all input in one chunk.");
+    po.Register("packet-size", &packet_size, "Send this many bytes per packet");
     po.Register("word-symbol-table", &word_syms_rxfilename,
                 "Symbol table for words [for debug output]");
     po.Register("modify-ivector-config", &modify_ivector_config,
@@ -248,13 +269,16 @@ int main(int argc, char *argv[]) {
                 "Number of threads used when initializing iVector extractor.  ");
     po.Register("server-port-number", &server_port_number,
                 "Tcp based Server port number for accepting tasks");
-    
-    feature_config.Register(&po);
-    decoder_pool._config.Register(&po);
-    endpoint_config.Register(&po);
-    
+
+    feature_opts.Register(&po);
+    decodable_opts.Register(&po);
+    decoder_pool.decoder_opts.Register(&po);
+    endpoint_opts.Register(&po);
+
+
     po.Read(argc, argv);
-    
+    secs_per_frame = 0.01 * decodable_opts.frame_subsampling_factor;
+
     if (po.NumArgs() != 3) {
       po.PrintUsage();
       return 1;
@@ -277,18 +301,28 @@ int main(int argc, char *argv[]) {
     
     decoder_pool._lexicon_info = new WordAlignLatticeLexiconInfo(lexicon);
     
-    decoder_pool._feature_info = new OnlineNnet2FeaturePipelineInfo(feature_config);
+    decoder_pool._feature_info = new OnlineNnet2FeaturePipelineInfo(feature_opts);
     if (modify_ivector_config) {
       decoder_pool._feature_info->ivector_extractor_info.use_most_recent_ivector = true;
       decoder_pool._feature_info->ivector_extractor_info.greedy_ivector_extractor = true;
     }
+    nnet3::AmNnetSimple am_nnet;
     {
       bool binary;
       Input ki(nnet3_rxfilename, &binary);
-      decoder_pool._tmodel.Read(ki.Stream(), binary);
-      decoder_pool._am_nnet.Read(ki.Stream(), binary);
+      decoder_pool.trans_model.Read(ki.Stream(), binary);
+      am_nnet.Read(ki.Stream(), binary);
+      SetBatchnormTestMode(true, &(am_nnet.GetNnet()));
+      SetDropoutTestMode(true, &(am_nnet.GetNnet()));
+      nnet3::CollapseModel(nnet3::CollapseModelConfig(), &(am_nnet.GetNnet()));
     }
-    decoder_pool._fst = ReadFstKaldi(fst_rxfilename);
+    // this object contains precomputed stuff that is used by all decodable
+    // objects.  It takes a pointer to am_nnet because if it has iVectors it has
+    // to modify the nnet to accept iVectors at intervals.
+    decoder_pool.decodable_info =
+      new nnet3::DecodableNnetSimpleLoopedInfo(decodable_opts, &am_nnet);
+
+    decoder_pool._fst = ReadFstKaldiGeneric(fst_rxfilename);
     if (word_syms_rxfilename != "")
       if (!(decoder_pool._word_syms = fst::SymbolTable::ReadText(word_syms_rxfilename)))
         KALDI_ERR << "Could not read symbol table from file "
@@ -357,7 +391,7 @@ bool TcpServer::Listen(int32 port) {
     return false;
   }
 
-  KALDI_LOG << "TcpServer: Listening on port: " << port;
+  KALDI_VLOG(1) << "TcpServer: Listening on port: " << port;
 
   return true;
 
@@ -369,7 +403,7 @@ TcpServer::~TcpServer() {
 }
 
 int32 TcpServer::Accept() {
-  KALDI_LOG << "Waiting for client...";
+  KALDI_VLOG(1) << "Waiting for client...";
 
   socklen_t len;
 
@@ -385,7 +419,8 @@ int32 TcpServer::Accept() {
   struct sockaddr_in *s = (struct sockaddr_in *) &addr;
   inet_ntop(AF_INET, &s->sin_addr, ipstr, sizeof ipstr);
 
-  KALDI_LOG << "TcpServer: Accepted connection from: " << ipstr;
+  KALDI_VLOG(1) << "TcpServer: Accepted connection from: " << ipstr;
+  signal(SIGPIPE, SIG_IGN);
 
   return client_desc;
 }
@@ -411,7 +446,7 @@ void* DecoderPool::ThreadProc(void* para) {
   DecoderThread* dt = (DecoderThread*)para;
   KALDI_ASSERT(dt != NULL);
   KALDI_ASSERT(dt->_pool != NULL);
-  KALDI_LOG << "Decoder " << dt->_tid << " is ready";
+  KALDI_VLOG(1) << "Decoder " << dt->_tid << " is ready";
   
   while(true) {
     if(dt->_client_socket == -1) {
@@ -419,24 +454,31 @@ void* DecoderPool::ThreadProc(void* para) {
       continue;
     }
     pthread_mutex_lock(&(dt->_lock));
-    KALDI_LOG << "Decoder " << dt->_tid << " is running";
+    KALDI_VLOG(1) << "Decoder " << dt->_tid << " is running";
 	//OnlineIvectorExtractorAdaptationState adaptation_state(
     //      dt->_pool->_feature_info->ivector_extractor_info);
     while (true) {
       OnlineNnet2FeaturePipeline feature_pipeline(*dt->_pool->_feature_info);
       SingleUtteranceNnet3Decoder decoder(
-          dt->_pool->_config, dt->_pool->_tmodel, dt->_pool->_am_nnet,
+          dt->_pool->decoder_opts, dt->_pool->trans_model, *dt->_pool->decodable_info,
           *dt->_pool->_fst, &feature_pipeline);
 
       OnlineTcpVectorSource au_src(dt->_client_socket);
-      int32 packet_size = 1024;
+      //int32 packet_size = 1024;
       std::string utt = "";
       BaseFloat samp_freq = 16000;
+      int32 chunk_length;
+      if (chunk_length_secs > 0) {
+        chunk_length = int32(samp_freq * chunk_length_secs);
+        if (chunk_length == 0) chunk_length = 1;
+      } else {
+        chunk_length = std::numeric_limits<int32>::max();
+      }
       
       int32 start_time = clock();
       
       OnlineTimer decoding_timer(utt);
-      int32 samp_offset = 0, samp_partial = 0;
+      int32 samp_offset = 0, samp_partial = 0, samp_process = 0;
       CompactLattice clat;
       bool end_of_utterance;
       
@@ -444,39 +486,43 @@ void* DecoderPool::ThreadProc(void* para) {
       while(true) {
         Vector<BaseFloat> wav_data(packet_size / 2);
         bool ans = au_src.Read(&wav_data);
-        if (!ans) break;
 
         feature_pipeline.AcceptWaveform(samp_freq, wav_data);
-        
-        samp_offset += packet_size / 2;
+
+        if (ans) samp_offset += packet_size / 2;
+        // by introducing minor delay, you'll get speedup.
+        if (samp_offset - samp_process < chunk_length && ans) continue;
+        samp_process = samp_offset;
         //decoding_timer.SleepUntil(samp_offset / samp_freq);
         decoder.AdvanceDecoding();
-        
-        if(samp_offset - samp_partial > 5.0 * samp_freq) {
+
+        if(samp_offset - samp_partial > 0.3 * samp_freq && decoder.NumFramesDecoded() > 0) {
           samp_partial = samp_offset;
           end_of_utterance = false;
           decoder.GetLattice(end_of_utterance, &clat);
           GetDiagnosticsAndPrintOutput(dt->_client_socket, end_of_utterance, start_time,
-                                       utt, dt->_pool->_tmodel, *dt->_pool->_lexicon_info,
+                                       utt, dt->_pool->trans_model, *dt->_pool->_lexicon_info,
                                        dt->_pool->_word_syms, clat, samp_offset);
         }
+        if (!ans) break;
       }
-      if(samp_offset == 0) break;
+      if(samp_offset == 0) {KALDI_VLOG(1) << "Decoder " << dt->_tid << " break"; break;}
 
       feature_pipeline.InputFinished();
       Timer timer;
       //decoder.Wait();
+      decoder.AdvanceDecoding();
       decoder.FinalizeDecoding();
 
       end_of_utterance = true;
       decoder.GetLattice(end_of_utterance, &clat);
       GetDiagnosticsAndPrintOutput(dt->_client_socket, end_of_utterance, start_time,
-                                   utt, dt->_pool->_tmodel, *dt->_pool->_lexicon_info,
+                                   utt, dt->_pool->trans_model, *dt->_pool->_lexicon_info,
                                    dt->_pool->_word_syms, clat, samp_offset);
       // In an application you might avoid updating the adaptation state if
         // you felt the utterance had low confidence.  See lat/confidence.h
       //decoder.GetAdaptationState(&adaptation_state);
-      KALDI_LOG << "Decoder " << dt->_tid << " finished";
+      KALDI_VLOG(1) << "Decoder " << dt->_tid << " finished";
       WriteLine(dt->_client_socket, "RESULT:DONE");
     }
     close(dt->_client_socket);
@@ -517,7 +563,7 @@ void DecoderPool::Run(const int32 &n) {
 void DecoderPool::NewTask(int32 client_socket) {
   for(int32 i = 0; i < _num; i++) {
     if(_decoder_threads[i]._is_free) {
-      KALDI_LOG << "Decoder " << _decoder_threads[i]._tid << " is free to used";
+      KALDI_VLOG(1) << "Decoder " << _decoder_threads[i]._tid << " is free to used";
       pthread_mutex_lock(&(_decoder_threads[i]._lock));
       _decoder_threads[i]._is_free = false;
       _decoder_threads[i]._client_socket = client_socket;

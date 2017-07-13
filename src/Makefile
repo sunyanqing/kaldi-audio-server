@@ -40,6 +40,7 @@ ADDLIBS = $(KALDI_ROOT)/src/online2/kaldi-online2.a \
           $(KALDI_ROOT)/src/online/kaldi-online.a \
           $(KALDI_ROOT)/src/ivector/kaldi-ivector.a \
           $(KALDI_ROOT)/src/nnet2/kaldi-nnet2.a \
+          $(KALDI_ROOT)/src/nnet3/kaldi-nnet3.a \
           $(KALDI_ROOT)/src/lat/kaldi-lat.a \
           $(KALDI_ROOT)/src/decoder/kaldi-decoder.a \
           $(KALDI_ROOT)/src/cudamatrix/kaldi-cudamatrix.a \
@@ -56,8 +57,6 @@ ADDLIBS = $(KALDI_ROOT)/src/online2/kaldi-online2.a \
 
 all: $(BINFILES)
 
-clean: 
-	-rm -f *.o *.a $(TESTFILES) $(BINFILES)
 
 include $(KALDI_ROOT)/src/makefiles/default_rules.mk
 
