@@ -28,6 +28,7 @@
 #include <ctime>
 
 #include "feat/wave-reader.h"
+#include "online2/online-nnet3-decoding.h"
 #include "online2/online-nnet2-decoding-threaded.h"
 #include "online2/onlinebin-util.h"
 #include "online2/online-timing.h"
@@ -292,7 +293,7 @@ int main(int argc, char *argv[]) {
       decoder_pool._tmodel.Read(ki.Stream(), binary);
       decoder_pool._am_nnet.Read(ki.Stream(), binary);
     }
-    decoder_pool._fst = fst::ReadFstKaldi(fst_rxfilename);
+    decoder_pool._fst = fst::ReadFstKaldiGeneric(fst_rxfilename);
     if (word_syms_rxfilename != "")
       if (!(decoder_pool._word_syms = fst::SymbolTable::ReadText(
           word_syms_rxfilename)))
