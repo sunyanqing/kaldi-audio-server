@@ -79,6 +79,9 @@ class DecoderPool {
   OnlineNnet2FeaturePipelineInfo *_feature_info;
   fst::SymbolTable *_word_syms;
   WordAlignLatticeLexiconInfo *_lexicon_info;
+  OnlineEndpointConfig endpoint_opts;
+  bool do_endpointing;
+  bool online = true;
 
   struct DecoderThread {
     DecoderPool *_pool;
@@ -88,6 +91,7 @@ class DecoderPool {
     int32 _client_socket;
     pthread_mutex_t _lock;
     bool _is_free;
+    int32 _idx;
   };
   static void* ThreadProc(void* para);
   void Run(const int32 &n);
@@ -239,9 +243,9 @@ int main(int argc, char *argv[]) {
     OnlineNnet2FeaturePipelineConfig feature_opts;
     nnet3::NnetSimpleLoopedComputationOptions decodable_opts;
     //LatticeFasterDecoderConfig decoder_opts;
-    OnlineEndpointConfig endpoint_opts;
+    //OnlineEndpointConfig endpoint_opts;
 
-    bool modify_ivector_config = false;
+    decoder_pool.do_endpointing = false;
     int32 server_port_number = 5010;
 
     po.Register("chunk-length", &chunk_length_secs,
@@ -251,15 +255,18 @@ int main(int argc, char *argv[]) {
                 "Send this many bytes per packet");
     po.Register("word-symbol-table", &word_syms_rxfilename,
                 "Symbol table for words [for debug output]");
-    po.Register("modify-ivector-config", &modify_ivector_config,
-                "If true, modifies the iVector configuration from the config "
-                "files by setting --use-most-recent-ivector=true and "
-                "--greedy-ivector-extractor=true. This will give the "
-                "best possible results, but the results may become dependent "
-                "on the speed of your machine (slower machine -> better "
-                "results).  Compare to the --online option in "
-                "online2-wav-nnet3-latgen-faster");
-    po.Register("num-threads-startup", &g_num_threads,
+    po.Register("do-endpointing", &decoder_pool.do_endpointing,
+                "If true, apply endpoint detection");
+    po.Register("online", &decoder_pool.online,
+                "You can set this to false to disable online iVector estimation "
+                "and have all the data for each utterance used, even at "
+                "utterance start.  This is useful where you just want the best "
+                "results and don't care about online operation.  Setting this to "
+                "false has the same effect as setting "
+                "--use-most-recent-ivector=true and --greedy-ivector-extractor=true "
+                "in the file given to --ivector-extraction-config, and "
+                "--chunk-length=-1.");
+    po.Register("num-threads", &g_num_threads,
                 "Number of threads used when initializing iVector extractor.");
     po.Register("server-port-number", &server_port_number,
                 "Tcp based Server port number for accepting tasks");
@@ -267,7 +274,7 @@ int main(int argc, char *argv[]) {
     feature_opts.Register(&po);
     decodable_opts.Register(&po);
     decoder_pool.decoder_opts.Register(&po);
-    endpoint_opts.Register(&po);
+    decoder_pool.endpoint_opts.Register(&po);
 
     po.Read(argc, argv);
     secs_per_frame = 0.01 * decodable_opts.frame_subsampling_factor;
@@ -295,7 +302,7 @@ int main(int argc, char *argv[]) {
     decoder_pool._lexicon_info = new WordAlignLatticeLexiconInfo(lexicon);
 
     decoder_pool._feature_info = new OnlineNnet2FeaturePipelineInfo(feature_opts);
-    if (modify_ivector_config) {
+    if (decoder_pool.online) {
       decoder_pool._feature_info->ivector_extractor_info.use_most_recent_ivector = true;
       decoder_pool._feature_info->ivector_extractor_info.greedy_ivector_extractor = true;
     }
@@ -438,15 +445,16 @@ void* DecoderPool::ThreadProc(void* para) {
   DecoderThread* dt = reinterpret_cast <DecoderThread*> (para);
   KALDI_ASSERT(dt != NULL);
   KALDI_ASSERT(dt->_pool != NULL);
-  KALDI_VLOG(1) << "Decoder " << dt->_tid << " is ready";
+  KALDI_VLOG(1) << "Decoder " << dt->_idx << " is ready";
 
   while (true) {
     if (dt->_client_socket == -1) {
       Sleep(0.1f);
       continue;
     }
+    OnlineTimingStats timing_stats;
     pthread_mutex_lock(&(dt->_lock));
-    KALDI_VLOG(1) << "Decoder " << dt->_tid << " is running";
+    KALDI_VLOG(1) << "Decoder " << dt->_idx << " is running";
 	//OnlineIvectorExtractorAdaptationState adaptation_state(
     //      dt->_pool->_feature_info->ivector_extractor_info);
     while (true) {
@@ -454,10 +462,11 @@ void* DecoderPool::ThreadProc(void* para) {
       SingleUtteranceNnet3Decoder decoder(
           dt->_pool->decoder_opts, dt->_pool->trans_model, *dt->_pool->decodable_info,
           *dt->_pool->_fst, &feature_pipeline);
+      std::string utt = "";
+      OnlineTimer decoding_timer(utt);
 
       OnlineTcpVectorSource au_src(dt->_client_socket);
-      //int32 packet_size = 1024;
-      std::string utt = "";
+
       BaseFloat samp_freq = 16000;
       int32 chunk_length;
       if (chunk_length_secs > 0) {
@@ -469,7 +478,6 @@ void* DecoderPool::ThreadProc(void* para) {
 
       int32 start_time = clock();
 
-      OnlineTimer decoding_timer(utt);
       int32 samp_offset = 0, samp_partial = 0, samp_process = 0;
       Lattice lat;
       bool end_of_utterance;
@@ -487,6 +495,9 @@ void* DecoderPool::ThreadProc(void* para) {
         samp_process = samp_offset;
         //decoding_timer.SleepUntil(samp_offset / samp_freq);
         decoder.AdvanceDecoding();
+        if (dt->_pool->do_endpointing && decoder.EndpointDetected(dt->_pool->endpoint_opts)) {
+          break;
+        }
 
         if (samp_offset - samp_partial > chunk_length
             && decoder.NumFramesDecoded() > 0) {
@@ -501,7 +512,7 @@ void* DecoderPool::ThreadProc(void* para) {
         if (!ans) break;
       }
       if (samp_offset == 0) {
-        KALDI_VLOG(1) << "Decoder " << dt->_tid << " break";
+        KALDI_VLOG(1) << "Decoder " << dt->_idx << " break";
         break;
       }
 
@@ -517,18 +528,18 @@ void* DecoderPool::ThreadProc(void* para) {
           dt->_client_socket, end_of_utterance, start_time,
           utt, dt->_pool->trans_model, *dt->_pool->_lexicon_info,
           dt->_pool->_word_syms, lat, samp_offset);
-      // In an application you might avoid updating the adaptation state if
-        // you felt the utterance had low confidence.  See lat/confidence.h
-      //decoder.GetAdaptationState(&adaptation_state);
-      KALDI_VLOG(1) << "Decoder " << dt->_tid << " finished";
+      decoding_timer.OutputStats(&timing_stats);
+      KALDI_VLOG(1) << "Decoder " << dt->_idx << " finished";
       WriteLine(dt->_client_socket, "RESULT:DONE");
     }
+    timing_stats.Print(dt->_pool->online);
     close(dt->_client_socket);
     dt->_is_free = true;
     dt->_client_socket = -1;
     pthread_mutex_unlock(&(dt->_lock));
   }
 
+  KALDI_VLOG(1) << "Error: Decoder " << dt->_idx << " Exit!";
   return reinterpret_cast <void*> (NULL);
 }
 
@@ -545,6 +556,7 @@ void DecoderPool::Run(const int32 &n) {
     pthread_mutex_init(&(_decoder_threads[i]._lock), NULL);
     _decoder_threads[i]._is_free = true;
     _decoder_threads[i]._client_socket = -1;
+    _decoder_threads[i]._idx = i;
   }
 
   for (i = 0; i < _num; i++) {
@@ -561,7 +573,7 @@ void DecoderPool::Run(const int32 &n) {
 void DecoderPool::NewTask(int32 client_socket) {
   for (int32 i = 0; i < _num; i++) {
     if (_decoder_threads[i]._is_free) {
-      KALDI_VLOG(1) << "Decoder " << _decoder_threads[i]._tid \
+      KALDI_VLOG(1) << "Decoder " << _decoder_threads[i]._idx \
           << " is free to used";
       pthread_mutex_lock(&(_decoder_threads[i]._lock));
       _decoder_threads[i]._is_free = false;
