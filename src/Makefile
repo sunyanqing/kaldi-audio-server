@@ -47,7 +47,6 @@ ADDLIBS = $(KALDI_ROOT)/src/online2/kaldi-online2.a \
           $(KALDI_ROOT)/src/feat/kaldi-feat.a \
           $(KALDI_ROOT)/src/transform/kaldi-transform.a \
           $(KALDI_ROOT)/src/gmm/kaldi-gmm.a \
-          $(KALDI_ROOT)/src/thread/kaldi-thread.a \
           $(KALDI_ROOT)/src/hmm/kaldi-hmm.a \
           $(KALDI_ROOT)/src/tree/kaldi-tree.a \
           $(KALDI_ROOT)/src/matrix/kaldi-matrix.a \
